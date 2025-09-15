@@ -186,3 +186,6 @@ trae_config.yaml
 
 # Patch selection python binary
 py312/
+
+.qoder/
+history_docs_tests/
