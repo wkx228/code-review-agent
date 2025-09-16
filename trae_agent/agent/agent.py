@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 from enum import Enum
+from typing import Union
 
 from trae_agent.utils.cli.cli_console import CLIConsole
 from trae_agent.utils.config import AgentConfig, Config
@@ -9,6 +10,7 @@ from trae_agent.utils.trajectory_recorder import TrajectoryRecorder
 
 class AgentType(Enum):
     TraeAgent = "trae_agent"
+    CodeReviewAgent = "code_review_agent"
 
 
 class Agent:
@@ -34,22 +36,37 @@ class Agent:
             self.trajectory_recorder = TrajectoryRecorder()
             self.trajectory_file = self.trajectory_recorder.get_trajectory_path()
 
-        match self.agent_type:
-            case AgentType.TraeAgent:
-                if config.trae_agent is None:
-                    raise ValueError("trae_agent_config is required for TraeAgent")
-                from .trae_agent import TraeAgent
+        # Initialize agent based on type
+        if self.agent_type == AgentType.TraeAgent:
+            if config.trae_agent is None:
+                raise ValueError("trae_agent_config is required for TraeAgent")
+            from .trae_agent import TraeAgent
 
-                self.agent_config: AgentConfig = config.trae_agent
+            self.agent_config: AgentConfig = config.trae_agent
+            self.agent = TraeAgent(
+                self.agent_config, docker_config=docker_config, docker_keep=docker_keep
+            )
+        elif self.agent_type == AgentType.CodeReviewAgent:
+            if config.code_review_agent is None:
+                raise ValueError(
+                    "code_review_agent_config is required for CodeReviewAgent")
+            from .code_review_agent import CodeReviewAgent
 
-                self.agent: TraeAgent = TraeAgent(
-                    self.agent_config, docker_config=docker_config, docker_keep=docker_keep
-                )
+            self.agent_config = config.code_review_agent
+            self.agent = CodeReviewAgent(
+                self.agent_config, docker_config=docker_config, docker_keep=docker_keep
+            )
+        else:
+            raise ValueError(f"Unknown agent type: {agent_type}")
 
-                self.agent.set_cli_console(cli_console)
+        self.agent.set_cli_console(cli_console)
 
         if cli_console:
-            if config.trae_agent.enable_lakeview:
+            # Handle lakeview configuration based on agent type
+            if self.agent_type == AgentType.TraeAgent and config.trae_agent and config.trae_agent.enable_lakeview:
+                cli_console.set_lakeview(config.lakeview)
+            elif self.agent_type == AgentType.CodeReviewAgent and config.code_review_agent and config.code_review_agent.enable_lakeview:
+                # Code review agent can optionally use lakeview if enabled
                 cli_console.set_lakeview(config.lakeview)
             else:
                 cli_console.set_lakeview(None)
@@ -64,10 +81,15 @@ class Agent:
     ):
         self.agent.new_task(task, extra_args, tool_names)
 
-        if self.agent.allow_mcp_servers:
-            if self.agent.cli_console:
-                self.agent.cli_console.print("Initialising MCP tools...")
-            await self.agent.initialise_mcp()
+        # MCP initialization only for TraeAgent
+        if self.agent_type == AgentType.TraeAgent:
+            # Use type casting to access TraeAgent specific attributes
+            from .trae_agent import TraeAgent
+            trae_agent = self.agent
+            if isinstance(trae_agent, TraeAgent) and hasattr(trae_agent, 'allow_mcp_servers') and trae_agent.allow_mcp_servers:
+                if trae_agent.cli_console:
+                    trae_agent.cli_console.print("Initialising MCP tools...")
+                await trae_agent.initialise_mcp()
 
         if self.agent.cli_console:
             task_details = {
@@ -90,9 +112,10 @@ class Agent:
         try:
             execution = await self.agent.execute_task()
         finally:
-            # Ensure MCP cleanup happens even if execution fails
-            with contextlib.suppress(Exception):
-                await self.agent.cleanup_mcp_clients()
+            # Ensure MCP cleanup happens even if execution fails (only for TraeAgent)
+            if self.agent_type == AgentType.TraeAgent:
+                with contextlib.suppress(Exception):
+                    await self.agent.cleanup_mcp_clients()
 
         if cli_console_task:
             await cli_console_task

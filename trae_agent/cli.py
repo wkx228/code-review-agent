@@ -173,8 +173,8 @@ def cli():
 @click.option(
     "--agent-type",
     "-at",
-    type=click.Choice(["trae_agent"], case_sensitive=False),
-    help="Type of agent to use (trae_agent)",
+    type=click.Choice(["trae_agent", "code_review_agent"], case_sensitive=False),
+    help="Type of agent to use (trae_agent, code_review_agent)",
     default="trae_agent",
 )
 def run(
@@ -416,8 +416,8 @@ def run(
 @click.option(
     "--agent-type",
     "-at",
-    type=click.Choice(["trae_agent"], case_sensitive=False),
-    help="Type of agent to use (trae_agent)",
+    type=click.Choice(["trae_agent", "code_review_agent"], case_sensitive=False),
+    help="Type of agent to use (trae_agent, code_review_agent)",
     default="trae_agent",
 )
 def interactive(
@@ -697,6 +697,138 @@ def tools():
             tools_table.add_row(tool_name, f"[red]Error loading: {e}[/red]")
 
     console.print(tools_table)
+
+
+@cli.command()
+@click.option("--repo-path", "-r", help="Path to the git repository to review", required=True)
+@click.option("--provider", "-p", help="LLM provider to use")
+@click.option("--model", "-m", help="Specific model to use")
+@click.option("--model-base-url", help="Base URL for the model API")
+@click.option("--api-key", "-k", help="API key (or set via environment variable)")
+@click.option("--max-steps", help="Maximum number of execution steps", type=int, default=20)
+@click.option("--analysis-scope", help="Scope of analysis", default="all", type=click.Choice(["all", "functions", "classes", "imports"]))
+@click.option("--risk-threshold", help="Risk threshold for reporting", default="medium", type=click.Choice(["low", "medium", "high"]))
+@click.option("--output", "-o", help="Output file for the review report")
+@click.option(
+    "--config-file",
+    help="Path to configuration file",
+    default="trae_config.yaml",
+    envvar="TRAE_CONFIG_FILE",
+)
+@click.option("--trajectory-file", "-t", help="Path to save trajectory file")
+@click.option(
+    "--console-type",
+    "-ct",
+    default="simple",
+    type=click.Choice(["simple", "rich"], case_sensitive=False),
+    help="Type of console to use (simple or rich)",
+)
+def code_review(
+    repo_path: str,
+    provider: str | None = None,
+    model: str | None = None,
+    model_base_url: str | None = None,
+    api_key: str | None = None,
+    max_steps: int = 20,
+    analysis_scope: str = "all",
+    risk_threshold: str = "medium",
+    output: str | None = None,
+    config_file: str = "trae_config.yaml",
+    trajectory_file: str | None = None,
+    console_type: str = "simple",
+):
+    """
+    Perform code review analysis on a git repository to detect breaking changes.
+    
+    This command analyzes the specified repository for potential breaking changes
+    and provides a comprehensive review report with recommendations.
+    """
+    # Apply backward compatibility for config file
+    config_file = resolve_config_file(config_file)
+
+    # Validate repository path
+    if not Path(repo_path).exists():
+        console.print(f"[red]Error: Repository path does not exist: {repo_path}[/red]")
+        sys.exit(1)
+
+    if not Path(repo_path).is_dir():
+        console.print(f"[red]Error: Repository path is not a directory: {repo_path}[/red]")
+        sys.exit(1)
+
+    # Make repository path absolute
+    repo_path = os.path.abspath(repo_path)
+
+    config = Config.create(
+        config_file=config_file,
+    ).resolve_config_values(
+        provider=provider,
+        model=model,
+        model_base_url=model_base_url,
+        api_key=api_key,
+        max_steps=max_steps,
+    )
+
+    # Create CLI Console
+    console_mode = ConsoleMode.RUN
+    selected_console_type = (
+        ConsoleType.SIMPLE if console_type.lower() == "simple" else ConsoleType.RICH
+    )
+
+    cli_console = ConsoleFactory.create_console(
+        console_type=selected_console_type, mode=console_mode
+    )
+
+    # Set initial task for rich console
+    if selected_console_type == ConsoleType.RICH and hasattr(cli_console, "set_initial_task"):
+        cli_console.set_initial_task(f"Code review of repository: {repo_path}")
+
+    # Create code review agent
+    agent = Agent(
+        "code_review_agent",
+        config,
+        trajectory_file,
+        cli_console,
+        docker_config=None,
+        docker_keep=True,
+    )
+
+    try:
+        task_args = {
+            "project_path": repo_path,
+            "analysis_scope": analysis_scope,
+            "risk_threshold": risk_threshold,
+            "focus_areas": "breaking_changes,compatibility,api_stability",
+            "include_suggestions": "true",
+        }
+
+        # Set up agent context for rich console if applicable
+        if selected_console_type == ConsoleType.RICH and hasattr(cli_console, "set_agent_context"):
+            cli_console.set_agent_context(agent, config.trae_agent, config_file, trajectory_file)
+
+        # Execute code review
+        task_description = f"Analyze the repository at {repo_path} for breaking changes and compatibility issues."
+        
+        console.print(f"[blue]Starting code review analysis of: {repo_path}[/blue]")
+        console.print(f"[blue]Analysis scope: {analysis_scope}[/blue]")
+        console.print(f"[blue]Risk threshold: {risk_threshold}[/blue]")
+        
+        _ = asyncio.run(agent.run(task_description, task_args))
+
+        console.print(f"\n[green]Code review completed successfully![/green]")
+        console.print(f"[green]Trajectory saved to: {agent.trajectory_file}[/green]")
+        
+        if output:
+            console.print(f"[blue]Review report saved to: {output}[/blue]")
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Code review interrupted by user[/yellow]")
+        console.print(f"[blue]Partial trajectory saved to: {agent.trajectory_file}[/blue]")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"\n[red]Error during code review: {e}[/red]")
+        console.print(traceback.format_exc())
+        console.print(f"[blue]Trajectory saved to: {agent.trajectory_file}[/blue]")
+        sys.exit(1)
 
 
 def main():

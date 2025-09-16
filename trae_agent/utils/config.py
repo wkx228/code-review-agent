@@ -182,6 +182,66 @@ class TraeAgentConfig(AgentConfig):
 
 
 @dataclass
+class CodeReviewAgentConfig(AgentConfig):
+    """
+    Code review agent configuration.
+
+    Author: Trae Agent Development Team
+    """
+
+    # Code review specific settings
+    analysis_scope: str = "all"  # all, functions, classes, imports
+    risk_threshold: str = "medium"  # low, medium, high
+    focus_areas: list[str] = field(
+        default_factory=lambda: ["breaking_changes",
+                                 "compatibility", "api_stability"]
+    )
+    include_suggestions: bool = True
+    output_format: str = "markdown"  # markdown, json, text
+
+    # Lakeview compatibility - code review agent doesn't use lakeview but needs to accept the parameter
+    enable_lakeview: bool = False
+
+    # Tools specific to code review
+    tools: list[str] = field(
+        default_factory=lambda: [
+            "git_diff_tool",
+            "breaking_change_analyzer",
+            "code_analysis_tool",
+            "str_replace_based_edit_tool",
+            "sequentialthinking",
+            "task_done",
+            "bash",
+        ]
+    )
+
+    def resolve_config_values(
+        self,
+        *,
+        max_steps: int | None = None,
+        analysis_scope: str | None = None,
+        risk_threshold: str | None = None,
+    ):
+        """Resolve configuration values with CLI overrides."""
+        resolved_max_steps = resolve_config_value(
+            cli_value=max_steps, config_value=self.max_steps)
+        if resolved_max_steps:
+            self.max_steps = int(resolved_max_steps)
+
+        resolved_analysis_scope = resolve_config_value(
+            cli_value=analysis_scope, config_value=self.analysis_scope
+        )
+        if resolved_analysis_scope:
+            self.analysis_scope = str(resolved_analysis_scope)
+
+        resolved_risk_threshold = resolve_config_value(
+            cli_value=risk_threshold, config_value=self.risk_threshold
+        )
+        if resolved_risk_threshold:
+            self.risk_threshold = str(resolved_risk_threshold)
+
+
+@dataclass
 class LakeviewConfig:
     """
     Lakeview configuration.
@@ -201,6 +261,7 @@ class Config:
     models: dict[str, ModelConfig] | None = None
 
     trae_agent: TraeAgentConfig | None = None
+    code_review_agent: CodeReviewAgentConfig | None = None
 
     @classmethod
     def create(
@@ -293,6 +354,14 @@ class Config:
                         if trae_agent_config.enable_lakeview and config.lakeview is None:
                             raise ConfigError("Lakeview is enabled but no lakeview config provided")
                         config.trae_agent = trae_agent_config
+                    case "code_review_agent":
+                        code_review_agent_config = CodeReviewAgentConfig(
+                            **agent_config,
+                            mcp_servers_config=mcp_servers_config,
+                            allow_mcp_servers=allow_mcp_servers,
+                        )
+                        code_review_agent_config.model = agent_model
+                        config.code_review_agent = code_review_agent_config
                     case _:
                         raise ConfigError(f"Unknown agent: {agent_name}")
         else:
@@ -307,12 +376,28 @@ class Config:
         model_base_url: str | None = None,
         api_key: str | None = None,
         max_steps: int | None = None,
+        analysis_scope: str | None = None,
+        risk_threshold: str | None = None,
     ):
         if self.trae_agent:
             self.trae_agent.resolve_config_values(
                 max_steps=max_steps,
             )
             self.trae_agent.model.resolve_config_values(
+                model_providers=self.model_providers,
+                provider=provider,
+                model=model,
+                model_base_url=model_base_url,
+                api_key=api_key,
+            )
+
+        if self.code_review_agent:
+            self.code_review_agent.resolve_config_values(
+                max_steps=max_steps,
+                analysis_scope=analysis_scope,
+                risk_threshold=risk_threshold,
+            )
+            self.code_review_agent.model.resolve_config_values(
                 model_providers=self.model_providers,
                 provider=provider,
                 model=model,
@@ -372,6 +457,14 @@ class Config:
             mcp_servers_config=mcp_servers_config,
         )
 
+        # Create default code review agent config
+        code_review_agent_config = CodeReviewAgentConfig(
+            max_steps=legacy_config.max_steps,
+            model=model_config,
+            allow_mcp_servers=legacy_config.allow_mcp_servers,
+            mcp_servers_config=mcp_servers_config,
+        )
+
         if trae_agent_config.enable_lakeview:
             lakeview_config = LakeviewConfig(
                 model=model_config,
@@ -381,6 +474,7 @@ class Config:
 
         return cls(
             trae_agent=trae_agent_config,
+            code_review_agent=code_review_agent_config,
             lakeview=lakeview_config,
             model_providers={
                 legacy_config.default_provider: model_provider,
